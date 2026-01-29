@@ -11,11 +11,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
+from rich.status import Status
+from rich.text import Text
 
 from terminal_copilot.config import load_config
 from terminal_copilot.models import CommandResult, InvestigationResult
-from terminal_copilot.workflow import run_workflow
+from terminal_copilot.agent import run_agent, run_agent_streaming
 from terminal_copilot.plugins import get_all_plugins
+from terminal_copilot.history import record_failed_command, load_last_failed
+from terminal_copilot.investigation import run_investigation
 
 app = typer.Typer(
     name="terminal-copilot",
@@ -116,19 +120,38 @@ def _display_diagnosis(result: Optional[InvestigationResult]) -> None:
     if not result:
         return
 
-    console.print()
-    console.print(Panel(
-        result.diagnosis,
-        title="[bold yellow]🔍 AI Diagnosis[/bold yellow]",
-        border_style="yellow",
-    ))
-    console.print()
+    # Root cause panel
+    if result.root_cause:
+        console.print()
+        console.print(Panel(
+            result.root_cause,
+            title="[bold yellow]🔍 Root Cause[/bold yellow]",
+            border_style="yellow",
+        ))
+        console.print()
 
+    # Confidence bar
+    if result.confidence > 0:
+        bar_len = 20
+        filled = int(bar_len * result.confidence / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        confidence_color = (
+            "[green]" if result.confidence >= 80
+            else "[yellow]" if result.confidence >= 50
+            else "[red]"
+        )
+        console.print(
+            f"  Confidence: {confidence_color}{bar} {result.confidence}%[/]"
+        )
+        console.print()
+
+    # Suggested commands
     if result.suggested_commands:
         cmd_table = Table.grid(padding=(0, 2))
-        cmd_table.add_column(style="bold cyan")
+        cmd_table.add_column(style="bold cyan", width=4)
+        cmd_table.add_column()
         for i, cmd in enumerate(result.suggested_commands, 1):
-            cmd_table.add_row(f"  {i}.", f"[bold white]{cmd}[/bold white]")
+            cmd_table.add_row(f"{i}.", f"[bold white]{cmd}[/bold white]")
         console.print(Panel(
             cmd_table,
             title="[bold green]💡 Suggested Commands[/bold green]",
@@ -136,17 +159,111 @@ def _display_diagnosis(result: Optional[InvestigationResult]) -> None:
         ))
         console.print()
 
+        console.print("[dim]Tip: Copy-paste any command above to fix the issue.[/dim]")
+        console.print()
+
+
+def _display_agent_progress(command: str) -> "AgentState":
+    """Run the agent with live progress display showing tool calls.
+
+    Args:
+        command: The command to investigate.
+
+    Returns:
+        The final AgentState.
+    """
+    from terminal_copilot.models import AgentState as AgentStateModel
+
+    console.print(f"[bold]Running[/bold] [white]{command}[/white]...")
+    console.print()
+
+    final_state: Optional[AgentStateModel] = None
+    tool_count = 0
+    tool_spinner = Status("[yellow]Investigating...[/yellow]", console=console)
+    tool_spinner.start()
+
+    for event in run_agent_streaming(command):
+        event_type = event.get("type")
+
+        if event_type == "node":
+            node = event.get("node", "")
+            # Print node progress as it happens
+            if node == "execute_command":
+                tool_spinner.update("[blue]⚡ Running command...[/blue]")
+            elif node == "find_plugin":
+                tool_spinner.update("[blue]🔌 Detecting plugin...[/blue]")
+            elif node == "collect_context":
+                tool_spinner.update("[blue]📦 Collecting context...[/blue]")
+            elif node == "initialize_agent":
+                tool_spinner.stop()
+                plugin_name = "unknown"
+                data = event.get("data", {})
+                if isinstance(data, dict):
+                    plugin_name = data.get("matching_plugin", "unknown")
+                console.print("  [green]✓[/green] Plugin: [bold]" + plugin_name + "[/bold]")
+                console.print()
+                tool_spinner = Status("[yellow]🤔 LLM reasoning...[/yellow]", console=console)
+                tool_spinner.start()
+
+        elif event_type == "tool_request":
+            tool = event.get("tool", "")
+            args = event.get("args", {})
+            thought = event.get("thought", "")
+            tool_count += 1
+            tool_spinner.stop()
+
+            args_str = ""
+            if args:
+                args_str = " " + " ".join(f"{k}={v}" for k, v in args.items())
+
+            console.print(f"  [bold cyan]🔧 Tool {tool_count}:[/bold cyan] [white]{tool}{args_str}[/white]")
+            if thought:
+                console.print(f"    [dim]└ {thought}[/dim]")
+            console.print()
+
+            tool_spinner = Status(f"[yellow]Executing {tool}...[/yellow]", console=console)
+            tool_spinner.start()
+
+        elif event_type == "tool_result":
+            tool_spinner.stop()
+            success = event.get("success", False)
+            summary = event.get("summary", "")
+            icon = "[green]✓[/green]" if success else "[red]✗[/red]"
+            summary_str = summary[:100] + "..." if len(summary) > 100 else summary
+            console.print(f"    {icon} [dim]{summary_str}[/dim]")
+            console.print()
+            tool_spinner = Status("[yellow]🤔 LLM reasoning...[/yellow]", console=console)
+            tool_spinner.start()
+
+        elif event_type == "done":
+            tool_spinner.stop()
+            state_data = event.get("state")
+            if state_data:
+                final_state = state_data
+            break
+
+    console.print("[bold blue]🔍 Generating diagnosis...[/bold blue]")
+    console.print()
+
+    if final_state is None:
+        # Fallback: run non-streaming
+        final_state = run_agent(command)
+
+    return final_state
+
 
 def _run_impl(command_str: str, config_path: Optional[Path] = None) -> None:
     """Shared implementation: execute a command and display the result."""
     _ = load_config(config_path)
 
-    state = run_workflow(command_str)
+    # Run the agent with live progress display
+    state = _display_agent_progress(command_str)
 
     if state.command_result is None:
         console.print("[red]Error: command execution returned no result[/red]")
         raise typer.Exit(code=1)
 
+    # Display result summary
     display_result(
         result=state.command_result,
         matching_plugin=state.matching_plugin or "unknown",
@@ -156,6 +273,14 @@ def _run_impl(command_str: str, config_path: Optional[Path] = None) -> None:
     if state.command_result.success:
         # Command succeeded — no investigation needed
         return
+
+    # Record to history for `explain` command
+    record_failed_command(
+        command=state.command,
+        result=state.command_result,
+        plugin=state.matching_plugin or "unknown",
+        context=state.context,
+    )
 
     # Command failed — show AI diagnosis
     if state.diagnosis:
@@ -185,6 +310,70 @@ def run(
     """
     command_str = " ".join(command)
     _run_impl(command_str, config)
+
+
+@app.command()
+def explain(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to config file",
+        exists=False,
+    ),
+) -> None:
+    """Analyze the last failed command without re-executing it.
+
+    Uses history stored in ~/.terminal-copilot/history.json.
+
+    Example: terminal-copilot explain
+    """
+    _ = load_config(config)
+
+    # Load last failed command from history
+    entry = load_last_failed()
+    if entry is None:
+        console.print("[yellow]No failed command history found.[/yellow]")
+        console.print("Run [bold]terminal-copilot run <command>[/bold] first.")
+        raise typer.Exit(code=1)
+
+    # Show what we're analyzing
+    console.print()
+    console.print(Panel(
+        f"[bold]Command:[/bold] {entry.command}\n"
+        f"[bold]Exit Code:[/bold] [red]{entry.exit_code}[/red]\n"
+        f"[bold]Plugin:[/bold] {entry.plugin}\n"
+        f"[bold]Timestamp:[/bold] {entry.timestamp}",
+        title="[bold]Analyzing Last Failed Command[/bold]",
+        border_style="blue",
+    ))
+    console.print()
+
+    if entry.context:
+        console.print(_build_context_tree(entry.context, "Stored Context"))
+        console.print()
+
+    if entry.stderr:
+        console.print(Panel(entry.stderr.strip(), title="stderr", border_style="red"))
+        console.print()
+
+    # Run the investigation (no re-execution)
+    console.print("[bold yellow]🔍 Investigating...[/bold yellow]")
+    console.print()
+
+    investigation_data = entry.to_investigation_data()
+
+    try:
+        result = run_investigation(investigation_data)
+        _display_diagnosis(result)
+    except ValueError as exc:
+        console.print(f"[red]✗ {exc}[/red]")
+        console.print()
+        console.print(
+            "[yellow]Tip: Set the GEMINI_API_KEY or GOOGLE_API_KEY "
+            "environment variable.[/yellow]"
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -227,6 +416,10 @@ def doctor() -> None:
     # Check plugins loaded
     plugins_loaded = len(get_all_plugins()) > 0
     checks.append(("Plugins loaded", plugins_loaded, None))
+
+    # Check history file
+    from terminal_copilot.history import HISTORY_PATH
+    checks.append(("History file exists", HISTORY_PATH.exists(), None))
 
     # Render results
     table = Table.grid(padding=(0, 2))

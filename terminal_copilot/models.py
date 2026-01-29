@@ -64,7 +64,14 @@ class InvestigationData(BaseModel):
 class InvestigationResult(BaseModel):
     """Result of the LLM investigation."""
 
-    diagnosis: str = Field(description="Markdown explanation of what went wrong")
+    root_cause: str = Field(
+        default="",
+        description="Concise description of the root cause",
+    )
+    confidence: int = Field(
+        default=0,
+        description="Confidence percentage (0-100)",
+    )
     suggested_commands: List[str] = Field(
         default_factory=list,
         description="Suggested commands to fix the issue",
@@ -73,10 +80,118 @@ class InvestigationResult(BaseModel):
         default="",
         description="Raw LLM response text",
     )
+    diagnosis: str = Field(
+        default="",
+        description="Full diagnosis text (backwards compat)",
+    )
+
+
+# ── Agent / Tool-Calling Models ──────────────────────────────────────────────
+
+
+class ToolResult(BaseModel):
+    """Result of executing a tool requested by the LLM."""
+
+    tool: str = Field(description="Name of the tool that was executed")
+    output: str = Field(
+        default="", description="Output from the tool (if successful)"
+    )
+    error: str = Field(
+        default="", description="Error message (if the tool failed)"
+    )
+
+    @property
+    def success(self) -> bool:
+        return not self.error
+
+
+class ToolRequest(BaseModel):
+    """A tool request from the LLM — either request a tool or finish."""
+
+    thought: str = Field(
+        default="",
+        description="The LLM's reasoning about what it needs next",
+    )
+    tool: Optional[str] = Field(
+        default=None,
+        description="Name of the tool to call (null/None if finishing)",
+    )
+    args: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Arguments to pass to the tool",
+    )
+    finish: bool = Field(
+        default=False,
+        description="Set to true when the LLM has enough information to diagnose",
+    )
+    root_cause: Optional[str] = Field(
+        default=None,
+        description="Root cause diagnosis (only when finish=true)",
+    )
+    confidence: Optional[int] = Field(
+        default=None,
+        description="Confidence percentage 0-100 (only when finish=true)",
+    )
+    commands: List[str] = Field(
+        default_factory=list,
+        description="Suggested fix commands (only when finish=true)",
+    )
+
+
+class AgentState(BaseModel):
+    """State that flows through the LangGraph agent loop.
+
+    Flow: Execute Command -> Find Plugin -> Initialize Investigation ->
+          Reason -> [Need Tool? -> Execute Tool -> Reason -> ...] -> Finish
+    """
+
+    command: str = Field(description="The original command to execute")
+    command_result: Optional[CommandResult] = Field(
+        default=None, description="Result of executing the command"
+    )
+    matching_plugin: Optional[str] = Field(
+        default=None, description="Name of the plugin that matched the command"
+    )
+    context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Structured context collected by the matching plugin",
+    )
+    investigation: Optional[InvestigationData] = Field(
+        default=None,
+        description="Structured investigation data built for the LLM",
+    )
+    diagnosis: Optional[InvestigationResult] = Field(
+        default=None,
+        description="LLM diagnosis result with suggestions",
+    )
+    error: Optional[str] = Field(
+        default=None, description="Error message if something failed"
+    )
+
+    # Agent loop state
+    messages: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Conversation history for the agent (system + user + assistant messages)",
+    )
+    tool_results: List[ToolResult] = Field(
+        default_factory=list,
+        description="Results of tool calls made during the investigation",
+    )
+    agent_iteration: int = Field(
+        default=0,
+        description="Current iteration of the agent loop (max 10)",
+    )
+    tool_request: Optional[ToolRequest] = Field(
+        default=None,
+        description="The latest tool request from the LLM",
+    )
+
+
+# ── Legacy WorkflowState (backwards compat) ──────────────────────────────────
 
 
 class WorkflowState(BaseModel):
-    """State that flows through the LangGraph workflow.
+    """Legacy state for backwards compatibility with old workflow.
 
     Flow: Execute Command -> Find Plugin -> Collect Context ->
           [Success? -> END] [Failure -> Build Investigation -> LLM Diagnosis -> END]

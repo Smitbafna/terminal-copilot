@@ -114,12 +114,14 @@ def run_investigation(data: InvestigationData) -> InvestigationResult:
         full_response.append(chunk)
 
     raw_text = "".join(full_response)
-    diagnosis, commands = parse_diagnosis(raw_text)
+    root_cause, confidence, commands = parse_diagnosis(raw_text)
 
     return InvestigationResult(
-        diagnosis=diagnosis,
+        root_cause=root_cause,
+        confidence=confidence,
         suggested_commands=commands,
         raw_response=raw_text,
+        diagnosis=raw_text,
     )
 
 
@@ -146,11 +148,13 @@ def run_investigation_streaming(
         yield chunk, None, None
 
     raw_text = "".join(full_response)
-    diagnosis, commands = parse_diagnosis(raw_text)
+    root_cause, confidence, commands = parse_diagnosis(raw_text)
     result = InvestigationResult(
-        diagnosis=diagnosis,
+        root_cause=root_cause,
+        confidence=confidence,
         suggested_commands=commands,
         raw_response=raw_text,
+        diagnosis=raw_text,
     )
 
     yield "", raw_text, result

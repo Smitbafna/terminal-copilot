@@ -10,6 +10,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from terminal_copilot.tools import get_tools_schema
+
 
 def _run_quick_command(cmd: str, timeout: int = 5) -> Optional[str]:
     """Run a quick shell command and return stripped stdout, or None on failure."""
@@ -73,6 +75,15 @@ class BasePlugin(ABC):
             A dict with structured context information.
         """
         return {}
+
+    def available_tools(self) -> List[Dict[str, Any]]:
+        """Return the subset of global tools relevant to this plugin.
+
+        Returns:
+            A list of tool schemas (name, description, args_schema) that
+            are relevant for diagnosing issues with this plugin's domain.
+        """
+        return []
 
 
 class NpmPlugin(BasePlugin):
