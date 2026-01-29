@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
-from rich.text import Text
 
 from terminal_copilot.config import load_config
-from terminal_copilot.models import CommandResult
+from terminal_copilot.models import CommandResult, InvestigationResult
 from terminal_copilot.workflow import run_workflow
 from terminal_copilot.plugins import get_all_plugins
 
@@ -113,6 +111,32 @@ def display_result(result: CommandResult, matching_plugin: str, context: Optiona
         console.print()
 
 
+def _display_diagnosis(result: Optional[InvestigationResult]) -> None:
+    """Display the investigation diagnosis and suggested commands."""
+    if not result:
+        return
+
+    console.print()
+    console.print(Panel(
+        result.diagnosis,
+        title="[bold yellow]🔍 AI Diagnosis[/bold yellow]",
+        border_style="yellow",
+    ))
+    console.print()
+
+    if result.suggested_commands:
+        cmd_table = Table.grid(padding=(0, 2))
+        cmd_table.add_column(style="bold cyan")
+        for i, cmd in enumerate(result.suggested_commands, 1):
+            cmd_table.add_row(f"  {i}.", f"[bold white]{cmd}[/bold white]")
+        console.print(Panel(
+            cmd_table,
+            title="[bold green]💡 Suggested Commands[/bold green]",
+            border_style="green",
+        ))
+        console.print()
+
+
 def _run_impl(command_str: str, config_path: Optional[Path] = None) -> None:
     """Shared implementation: execute a command and display the result."""
     _ = load_config(config_path)
@@ -129,13 +153,24 @@ def _run_impl(command_str: str, config_path: Optional[Path] = None) -> None:
         context=state.context,
     )
 
-    if not state.command_result.success:
-        raise typer.Exit(code=state.command_result.exit_code)
+    if state.command_result.success:
+        # Command succeeded — no investigation needed
+        return
+
+    # Command failed — show AI diagnosis
+    if state.diagnosis:
+        _display_diagnosis(state.diagnosis)
+
+    raise typer.Exit(code=state.command_result.exit_code)
 
 
 @app.command()
 def run(
-    ctx: typer.Context,
+    command: List[str] = typer.Argument(
+        ...,
+        help="The shell command to execute (no quotes needed: `run git status` works)",
+        show_default=False,
+    ),
     config: Optional[Path] = typer.Option(
         None,
         "--config",
@@ -144,13 +179,11 @@ def run(
         exists=False,
     ),
 ) -> None:
-    """Execute a shell command and display the result with diagnostic context."""
-    # ctx.args contains everything after the subcommand
-    # Join them back into a single command string
-    command_str = " ".join(ctx.args)
-    if not command_str:
-        console.print("[red]Error: no command provided[/red]")
-        raise typer.Exit(code=1)
+    """Execute a shell command and display the result with diagnostic context.
+
+    Example: terminal-copilot run npm install
+    """
+    command_str = " ".join(command)
     _run_impl(command_str, config)
 
 
@@ -219,7 +252,6 @@ def doctor() -> None:
             f"[bold yellow]{passed}/{total} checks passed. "
             f"{total - passed} issue(s) found.[/bold yellow]"
         )
-        console.print()
         console.print(
             "[yellow]Tip: Some features may not work without the missing dependencies.[/yellow]"
         )
@@ -244,33 +276,9 @@ def _check_tool(cmd: str) -> bool:
 
 
 def entry() -> None:
-    """Entry point for the CLI.  Patches sys.argv so that quoted arguments
-    reach Typer properly as extra args instead of being tokenized."""
-    # If the user ran: terminal-copilot run <command...>
-    # We intercept and pass everything after 'run' as extra_args to the run command
-    # This avoids Typer's shell-style tokenization of the command argument
-    if len(sys.argv) >= 3 and sys.argv[1] == "run":
-        # Collect everything after "run" as a single quoted argument
-        cmd_parts = sys.argv[2:]
-        if not cmd_parts:
-            print("Error: no command provided", file=sys.stderr)
-            sys.exit(1)
-        command_str = " ".join(cmd_parts)
+    """Entry point for the CLI (installed via pyproject.toml scripts)."""
+    app()
 
-        # Parse --config/-c if present
-        config_path: Optional[Path] = None
-        remaining: list[str] = []
-        i = 0
-        while i < len(cmd_parts):
-            if cmd_parts[i] in ("--config", "-c") and i + 1 < len(cmd_parts):
-                config_path = Path(cmd_parts[i + 1])
-                i += 2
-            else:
-                remaining.append(cmd_parts[i])
-                i += 1
 
-        command_str = " ".join(remaining)
-        _run_impl(command_str, config_path)
-    else:
-        # Normal Typer flow (--help, --install-completion, etc.)
-        app()
+if __name__ == "__main__":
+    entry()
