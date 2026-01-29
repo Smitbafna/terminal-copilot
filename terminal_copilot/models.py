@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -39,7 +39,10 @@ class AppConfig(BaseModel):
 
 
 class WorkflowState(BaseModel):
-    """State that flows through the LangGraph workflow."""
+    """State that flows through the LangGraph workflow.
+
+    Flow: Execute Command -> Find Plugin -> Collect Context -> Finish
+    """
 
     command: str = Field(description="The original command to execute")
     command_result: Optional[CommandResult] = Field(
@@ -47,6 +50,10 @@ class WorkflowState(BaseModel):
     )
     matching_plugin: Optional[str] = Field(
         default=None, description="Name of the plugin that matched the command"
+    )
+    context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Structured context collected by the matching plugin",
     )
     error: Optional[str] = Field(
         default=None, description="Error message if something failed"
