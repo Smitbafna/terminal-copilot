@@ -53,6 +53,13 @@ def _find_project_root(cwd: Optional[Path] = None) -> Path:
     for parent in [current] + list(current.parents):
         if (parent / ".git").exists():
             return parent
+        # Also treat Cargo.toml, package.json, pyproject.toml as project roots
+        if (parent / "Cargo.toml").exists():
+            return parent
+        if (parent / "package.json").exists():
+            return parent
+        if (parent / "pyproject.toml").exists():
+            return parent
     return current
 
 
