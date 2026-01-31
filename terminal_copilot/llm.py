@@ -21,7 +21,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 load_dotenv()  # also check cwd and parent dirs as fallback
 
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
 
 def _get_api_key() -> str:
@@ -150,18 +150,20 @@ def call_llm_for_tool_request(
     Raises:
         ValueError: If the LLM response cannot be parsed as valid JSON.
     """
-    # Find the system prompt or build one
     system_content = _make_system_prompt(tools_schema)
 
-    # Get the last user message with investigation context
-    user_content = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            user_content = msg.get("content", "")
-            break
+    # Build the full conversation history into the prompt so the LLM
+    # can see ALL previous tool calls, results, and its own thoughts.
+    conversation_parts: list[str] = []
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        label = role.upper() if role == "user" or role == "assistant" else role
+        conversation_parts.append(f"{label}:\n{content}")
 
-    # Build the full prompt
-    prompt = f"{system_content}\n\n{user_content}"
+    conversation_history = "\n\n".join(conversation_parts)
+
+    prompt = f"{system_content}\n\n{conversation_history}\n\nWhat is your next step? Respond with JSON."
 
     api_key = _get_api_key()
     client = genai.Client(api_key=api_key)
