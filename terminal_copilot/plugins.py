@@ -34,6 +34,48 @@ def _file_exists(path: Path) -> bool:
     return path.exists()
 
 
+# Mapping of project types to their marker files
+PROJECT_MARKERS: Dict[str, List[str]] = {
+    "Node": ["package.json"],
+    "Rust": ["Cargo.toml"],
+    "Go": ["go.mod"],
+    "Python": ["requirements.txt", "pyproject.toml"],
+    "Docker": ["Dockerfile"],
+    "Docker Compose": ["docker-compose.yml", "docker-compose.yaml"],
+}
+
+
+def detect_project_type(cwd: Optional[Path] = None) -> str:
+    """Detect the project type based on marker files.
+
+    Walks up from the current directory to find project root, then checks
+    for known project marker files to determine the project type.
+
+    Args:
+        cwd: The working directory to start from. Defaults to current directory.
+
+    Returns:
+        The detected project type (e.g., "Node", "Rust", "Go", "Python", "Docker",
+        "Docker Compose") or "Unknown" if no markers found.
+    """
+    project_root = _find_project_root(cwd)
+
+    # Check each project type's markers
+    for project_type, markers in PROJECT_MARKERS.items():
+        for marker in markers:
+            if (project_root / marker).exists():
+                return project_type
+
+    # Special case: Check for both Dockerfile and docker-compose.yml
+    # Docker Compose takes precedence if both exist
+    if (project_root / "docker-compose.yml").exists() or (project_root / "docker-compose.yaml").exists():
+        return "Docker Compose"
+    if (project_root / "Dockerfile").exists():
+        return "Docker"
+
+    return "Unknown"
+
+
 def _find_project_root(cwd: Optional[Path] = None) -> Path:
     """Walk up from cwd to find a project root (has .git, .gitignore, etc.)."""
     current = cwd or Path.cwd().resolve()

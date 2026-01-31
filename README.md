@@ -76,21 +76,56 @@ README.md
 - [PyYAML](https://pyyaml.org/) – Config parsing
 - [LangGraph](https://langchain-ai.github.io/langgraph/) – Workflow graph
 
-## Milestone 1
+## Milestone 4: Project Health & Preflight Checks
 
-- [x] CLI with `run` command
-- [x] Shell command execution via subprocess
-- [x] Rich output with panels
-- [x] YAML config loader
-- [x] Plugin skeleton (npm, docker, git)
-- [x] LangGraph workflow skeleton
+- [x] Preflight checks before command execution
+- [x] Plugin-specific health checks (npm, docker, git, python, rust, go)
+- [x] Warning system for potential issues
+- [x] Error blocking for preventing dangerous commands
+- [x] `--skip-preflight` flag to bypass checks
+
+### Project Detection
+
+Terminal Copilot can automatically detect your project type based on common marker files:
+
+- **package.json** → Node
+- **Cargo.toml** → Rust
+- **go.mod** → Go
+- **requirements.txt** or **pyproject.toml** → Python
+- **Dockerfile** → Docker
+- **docker-compose.yml** → Docker Compose
+
+```bash
+# Detect project type in current directory
+terminal-copilot detect
+
+# Detect project type in a specific directory
+terminal-copilot detect --path /path/to/project
+```
+
+### Preflight Checks
+
+Before executing a command, Terminal Copilot now inspects for common problems:
+
+- **npm/pnpm/yarn**: Checks for package.json, node/npm availability, common typos
+- **docker**: Checks for Docker daemon status, missing images
+- **git**: Checks for git installation and repository presence
+- **python**: Checks for Python availability, file existence, virtualenv status
+- **rust**: Checks for cargo installation, Cargo.toml presence
+- **go**: Checks for go installation, go.mod presence
+- **generic**: Checks for sudo usage, dangerous rm commands
+
+```bash
+# Preflight warnings will be shown
+terminal-copilot run "npm install"  # Warns if package.json missing
+
+# Skip preflight checks with -s flag
+terminal-copilot run -s "npm install"  # Skip checks
+```
 
 ## Future Milestones
 
-- LLM integration
-- AI reasoning and diagnostics
 - Auto-fixing failed commands
 - File scanning and project analysis
-- Streaming output
+- Streaming output improvements
 - Watchdog mode
-- Terminal interception

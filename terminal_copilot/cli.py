@@ -17,9 +17,10 @@ from rich.text import Text
 from terminal_copilot.config import load_config
 from terminal_copilot.models import CommandResult, InvestigationResult
 from terminal_copilot.agent import run_agent, run_agent_streaming
-from terminal_copilot.plugins import get_all_plugins
+from terminal_copilot.plugins import get_all_plugins, detect_project_type, PROJECT_MARKERS
 from terminal_copilot.history import record_failed_command, load_last_failed
 from terminal_copilot.investigation import run_investigation
+from terminal_copilot.preflight import run_preflight, format_preflight_result
 
 app = typer.Typer(
     name="terminal-copilot",
@@ -252,9 +253,41 @@ def _display_agent_progress(command: str) -> "AgentState":
     return final_state
 
 
-def _run_impl(command_str: str, config_path: Optional[Path] = None) -> None:
+def _run_impl(command_str: str, config_path: Optional[Path] = None, skip_preflight: bool = False) -> None:
     """Shared implementation: execute a command and display the result."""
     _ = load_config(config_path)
+
+    # Run preflight checks before executing
+    if not skip_preflight:
+        preflight_result = run_preflight(command_str)
+        if preflight_result.errors:
+            # Show errors and ask for confirmation
+            console.print()
+            console.print(Panel(
+                preflight_result.errors[0].message,
+                title="[bold red]Preflight Error[/bold red]",
+                border_style="red",
+            ))
+            if preflight_result.errors[0].suggestion:
+                console.print(f"[dim]{preflight_result.errors[0].suggestion}[/dim]")
+            console.print()
+            console.print("[yellow]Use --skip-preflight to override[/yellow]")
+            raise typer.Exit(code=1)
+        
+        if preflight_result.warnings or preflight_result.infos:
+            console.print("[bold blue]🔍 Preflight Checks[/bold blue]")
+            console.print()
+            if preflight_result.warnings:
+                for issue in preflight_result.warnings:
+                    console.print(f"[yellow]⚠ {issue.message}[/yellow]")
+                    if issue.suggestion:
+                        console.print(f"  [dim]{issue.suggestion}[/dim]")
+            if preflight_result.infos:
+                for issue in preflight_result.infos:
+                    console.print(f"[blue]ℹ {issue.message}[/blue]")
+                    if issue.suggestion:
+                        console.print(f"  [dim]{issue.suggestion}[/dim]")
+            console.print()
 
     # Run the agent with live progress display
     state = _display_agent_progress(command_str)
@@ -296,6 +329,12 @@ def run(
         help="The shell command to execute (no quotes needed: `run git status` works)",
         show_default=False,
     ),
+    skip_preflight: bool = typer.Option(
+        False,
+        "--skip-preflight",
+        "-s",
+        help="Skip preflight checks before running the command",
+    ),
     config: Optional[Path] = typer.Option(
         None,
         "--config",
@@ -309,7 +348,7 @@ def run(
     Example: terminal-copilot run npm install
     """
     command_str = " ".join(command)
-    _run_impl(command_str, config)
+    _run_impl(command_str, config, skip_preflight)
 
 
 @app.command()
@@ -466,6 +505,105 @@ def _check_tool(cmd: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def _get_all_detected_projects(cwd: Optional[Path] = None) -> Dict[str, bool]:
+    """Get all detected project types for a directory.
+
+    Args:
+        cwd: The working directory to check. Defaults to current directory.
+
+    Returns:
+        A dictionary mapping project type names to whether they were detected.
+    """
+    project_root = cwd or Path.cwd()
+    detected: Dict[str, bool] = {}
+
+    for project_type, markers in PROJECT_MARKERS.items():
+        found = False
+        for marker in markers:
+            if (project_root / marker).exists():
+                found = True
+                break
+        detected[project_type] = found
+
+    return detected
+
+
+@app.command()
+def detect(
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Path to check for project type (defaults to current directory)",
+        exists=False,
+    ),
+) -> None:
+    """Detect the project type based on marker files.
+
+    Walks up from the given directory to find a project root, then checks
+    for known project marker files to determine the project type.
+
+    Example: terminal-copilot detect
+    """
+    cwd = path or Path.cwd()
+    project_root = cwd.resolve()
+
+    # Walk up to find project root
+    for parent in [project_root] + list(project_root.parents):
+        if (parent / ".git").exists():
+            project_root = parent
+            break
+
+    console.print()
+    console.print("[bold blue]Project Detection[/bold blue]")
+    console.print()
+
+    # Get primary project type
+    project_type = detect_project_type(cwd)
+
+    # Display results
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold", width=20)
+    table.add_column()
+
+    if project_type != "Unknown":
+        icon = "[green]✓[/green]"
+        table.add_row("Project Type:", f"{icon} [bold]{project_type}[/bold]")
+    else:
+        icon = "[dim]○[/dim]"
+        table.add_row("Project Type:", f"{icon} [dim]Unknown[/dim]")
+
+    table.add_row("Project Root:", str(project_root))
+
+    console.print(Panel(table, title="[bold]Project Detection Result[/bold]", border_style="blue"))
+    console.print()
+
+    # Show all detected markers
+    console.print("[bold]Detected Markers:[/bold]")
+    console.print()
+
+    marker_table = Table.grid(padding=(0, 2))
+    marker_table.add_column(style="bold", width=20)
+    marker_table.add_column()
+
+    all_detected = _get_all_detected_projects(project_root)
+    for project_type_name, is_detected in all_detected.items():
+        icon = "[green]✓[/green]" if is_detected else "[dim]○[/dim]"
+        status = "Found" if is_detected else "Not found"
+
+        # Get the marker files for this project type
+        markers = PROJECT_MARKERS.get(project_type_name, [])
+        marker_str = ", ".join(markers) if markers else "N/A"
+
+        marker_table.add_row(
+            f"{icon} {project_type_name}",
+            f"{status} {marker_str}"
+        )
+
+    console.print(marker_table)
+    console.print()
 
 
 def entry() -> None:
