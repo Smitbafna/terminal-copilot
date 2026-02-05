@@ -17,7 +17,7 @@ from rich.text import Text
 from terminal_copilot.config import load_config
 from terminal_copilot.models import CommandResult, InvestigationResult
 from terminal_copilot.agent import run_agent, run_agent_streaming
-from terminal_copilot.plugins import get_all_plugins, detect_project_type, PROJECT_MARKERS
+from terminal_copilot.plugins import get_all_plugins, detect_project_type, PROJECT_MARKERS, validate_environment
 from terminal_copilot.history import record_failed_command, load_last_failed
 from terminal_copilot.investigation import run_investigation
 from terminal_copilot.preflight import run_preflight, format_preflight_result
@@ -603,6 +603,64 @@ def detect(
         )
 
     console.print(marker_table)
+    console.print()
+
+
+@app.command()
+def validate(
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Path to check for environment validation (defaults to current directory)",
+        exists=False,
+    ),
+) -> None:
+    """Validate the environment against detected project requirements.
+
+    Checks for version compatibility and runtime environment issues:
+
+    - Node.js: Compares installed version against package.json engines requirement
+    - Python: Compares installed version against pyproject.toml python_requires
+    - Docker: Checks if Docker daemon is running when Dockerfile exists
+
+    Example: terminal-copilot validate
+    """
+    cwd = path or Path.cwd()
+
+    console.print()
+    console.print("[bold blue]Environment Validation[/bold blue]")
+    console.print()
+
+    # Get environment warnings
+    warnings = validate_environment(cwd)
+
+    if not warnings:
+        console.print("[bold green]✓ Environment is compatible with project requirements[/bold green]")
+        console.print()
+        return
+
+    # Display warnings
+    console.print("[yellow]⚠ Environment Issues Detected:[/yellow]")
+    console.print()
+
+    warning_table = Table.grid(padding=(0, 2))
+    warning_table.add_column(style="bold", width=15)
+    warning_table.add_column()
+
+    for check_name, message in warnings.items():
+        if "version mismatch" in check_name.lower() or "mismatch" in message.lower():
+            icon = "[yellow]⚠[/yellow]"
+        else:
+            icon = "[red]✗[/red]"
+        warning_table.add_row(f"{icon} {check_name}", message)
+
+    console.print(warning_table)
+    console.print()
+
+    # Show project type for context
+    project_type = detect_project_type(cwd)
+    console.print(f"[dim]Project type: {project_type}[/dim]")
     console.print()
 
 

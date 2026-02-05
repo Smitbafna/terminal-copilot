@@ -83,6 +83,9 @@ README.md
 - [x] Warning system for potential issues
 - [x] Error blocking for preventing dangerous commands
 - [x] `--skip-preflight` flag to bypass checks
+- [x] Project type detection from marker files
+- [x] Environment validation against project requirements
+- [x] Missing dependency detection (node_modules, Cargo.lock)
 
 ### Project Detection
 
@@ -101,6 +104,23 @@ terminal-copilot detect
 
 # Detect project type in a specific directory
 terminal-copilot detect --path /path/to/project
+```
+
+### Environment Validation
+
+Validate your environment against project requirements to catch compatibility issues:
+
+- **Node.js**: Compares installed version against `package.json` `engines.node` requirement
+- **Python**: Compares installed version against `pyproject.toml` `python_requires` requirement
+- **Docker**: Checks if Docker daemon is running when Dockerfile/docker-compose.yml exists
+- **Dependencies**: Detects missing dependency directories (node_modules, Cargo.lock)
+
+```bash
+# Validate environment compatibility
+terminal-copilot validate
+
+# Validate in a specific directory
+terminal-copilot validate --path /path/to/project
 ```
 
 ### Preflight Checks

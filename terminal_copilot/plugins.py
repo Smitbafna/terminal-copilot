@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from abc import ABC, abstractmethod
@@ -43,6 +44,203 @@ PROJECT_MARKERS: Dict[str, List[str]] = {
     "Docker": ["Dockerfile"],
     "Docker Compose": ["docker-compose.yml", "docker-compose.yaml"],
 }
+
+
+def _parse_version(version_str: str) -> Optional[int]:
+    """Parse a version string like 'v18.0.0' or '18.0.0' to major version int."""
+    import re
+    match = re.search(r"(\d+)", version_str)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _check_node_version(project_root: Path) -> Optional[str]:
+    """Check Node.js version compatibility against package.json engines field.
+
+    Returns warning message if version mismatch detected, None otherwise.
+    """
+    package_json = project_root / "package.json"
+    if not package_json.exists():
+        return None
+
+    try:
+        with open(package_json) as f:
+            pkg = json.load(f)
+
+        engines = pkg.get("engines", {})
+        node_req = engines.get("node", "")
+        if not node_req:
+            return None
+
+        # Parse required version (supports >=, >, ^, etc.)
+        import re
+        match = re.search(r"(\d+)", node_req)
+        if not match:
+            return None
+
+        required_major = int(match.group(1))
+
+        # Get installed version
+        installed = _run_quick_command("node --version 2>/dev/null")
+        if not installed:
+            return "Node.js is not installed"
+
+        installed_major = _parse_version(installed)
+        if installed_major is None:
+            return None
+
+        if installed_major < required_major:
+            return (
+                f"Version mismatch detected: package.json requires Node {node_req}, "
+                f"but installed Node is {installed}"
+            )
+        return None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _check_python_version(project_root: Path) -> Optional[str]:
+    """Check Python version compatibility against pyproject.toml or setup.py.
+
+    Returns warning message if version mismatch detected, None otherwise.
+    """
+    # Check pyproject.toml first (PEP 621)
+    pyproject = project_root / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            with open(pyproject) as f:
+                content = f.read()
+
+            # Look for python_requires
+            match = re.search(r"python_requires\s*=\s*[\"']([^\"']+)[\"']", content)
+            if match:
+                req_str = match.group(1)
+                # Parse required version (supports >=3.12, >3.10, etc.)
+                req_match = re.search(r"(\d+)\.(\d+)", req_str)
+                if req_match:
+                    required_major = int(req_match.group(1))
+                    required_minor = int(req_match.group(2))
+
+                    import sys
+                    current = sys.version_info
+                    current_major = current.major
+                    current_minor = current.minor
+
+                    if (current_major, current_minor) < (required_major, required_minor):
+                        return (
+                            f"Version mismatch detected: pyproject.toml requires Python "
+                            f"{req_str}, but current Python is {current_major}.{current_minor}"
+                        )
+        except OSError:
+            pass
+
+    return None
+
+
+def _check_docker_daemon(project_root: Path) -> Optional[str]:
+    """Check if Docker daemon is running when Docker-related files exist.
+
+    Returns warning message if daemon not running, None otherwise.
+    """
+    has_docker_files = (
+        (project_root / "Dockerfile").exists() or
+        (project_root / "docker-compose.yml").exists() or
+        (project_root / "docker-compose.yaml").exists()
+    )
+
+    if not has_docker_files:
+        return None
+
+    docker_ps = _run_quick_command("docker ps 2>&1")
+    if docker_ps and "Cannot connect to the Docker daemon" in docker_ps:
+        return "Dockerfile exists but Docker daemon is not running"
+
+    return None
+
+
+def _check_node_modules(project_root: Path) -> Optional[str]:
+    """Check for missing node_modules directory.
+
+    Returns warning message if node_modules missing but package.json/lock present, None otherwise.
+    """
+    package_json = project_root / "package.json"
+    if not package_json.exists():
+        return None
+
+    # Check if lockfile exists (indicates dependencies have been installed)
+    has_lockfile = (
+        (project_root / "package-lock.json").exists() or
+        (project_root / "pnpm-lock.yaml").exists() or
+        (project_root / "yarn.lock").exists()
+    )
+
+    has_node_modules = (project_root / "node_modules").is_dir()
+
+    if has_lockfile and not has_node_modules:
+        return "package.json exists but node_modules directory is missing (run npm install)"
+
+    return None
+
+
+def _check_cargo_lock(project_root: Path) -> Optional[str]:
+    """Check for missing Cargo.lock for Rust projects.
+
+    Returns warning message if Cargo.lock missing but Cargo.toml present, None otherwise.
+    """
+    cargo_toml = project_root / "Cargo.toml"
+    if not cargo_toml.exists():
+        return None
+
+    has_cargo_lock = (project_root / "Cargo.lock").exists()
+    has_target = (project_root / "target").is_dir()
+
+    if not has_cargo_lock and not has_target:
+        return "Cargo.toml exists but Cargo.lock and target directory are missing (run cargo fetch)"
+
+    return None
+
+
+def validate_environment(cwd: Optional[Path] = None) -> Dict[str, str]:
+    """Validate the environment against detected project requirements.
+
+    Walks up from cwd to find project root, detects project type, and checks
+    for version compatibility, runtime environment issues, and missing dependencies.
+
+    Args:
+        cwd: The working directory to start from. Defaults to current directory.
+
+    Returns:
+        A dictionary with warning messages for each detected issue.
+    """
+    warnings: Dict[str, str] = {}
+    project_root = _find_project_root(cwd)
+    project_type = detect_project_type(cwd)
+
+    if project_type == "Node":
+        warning = _check_node_version(project_root)
+        if warning:
+            warnings["node_version"] = warning
+        warning = _check_node_modules(project_root)
+        if warning:
+            warnings["node_modules"] = warning
+
+    elif project_type == "Rust":
+        warning = _check_cargo_lock(project_root)
+        if warning:
+            warnings["cargo_lock"] = warning
+
+    elif project_type == "Python":
+        warning = _check_python_version(project_root)
+        if warning:
+            warnings["python_version"] = warning
+
+    elif project_type in ("Docker", "Docker Compose"):
+        warning = _check_docker_daemon(project_root)
+        if warning:
+            warnings["docker_daemon"] = warning
+
+    return warnings
 
 
 def detect_project_type(cwd: Optional[Path] = None) -> str:
