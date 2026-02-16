@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,12 +17,27 @@ from rich.status import Status
 from rich.text import Text
 
 from terminal_copilot.config import load_config
-from terminal_copilot.models import CommandResult, InvestigationResult
+from terminal_copilot.models import CommandResult, InvestigationResult, AgentState
 from terminal_copilot.agent import run_agent, run_agent_streaming
-from terminal_copilot.plugins import get_all_plugins, detect_project_type, PROJECT_MARKERS, validate_environment
+from terminal_copilot.plugins import (
+    get_all_plugins,
+    get_plugin_by_name,
+    find_matching_plugin,
+    detect_project_type,
+    PROJECT_MARKERS,
+    validate_environment,
+    _detect_framework,
+    _find_project_root,
+)
 from terminal_copilot.history import record_failed_command, load_last_failed
-from terminal_copilot.investigation import run_investigation
-from terminal_copilot.preflight import run_preflight, format_preflight_result
+from terminal_copilot.investigation import run_investigation, build_investigation
+from terminal_copilot.preflight import (
+    run_preflight,
+    format_preflight_result,
+    predict_potential_issues,
+    run_intelligent_warnings,
+)
+from terminal_copilot.runner import run_command
 
 app = typer.Typer(
     name="terminal-copilot",
@@ -142,7 +159,7 @@ def _display_diagnosis(result: Optional[InvestigationResult]) -> None:
             else "[red]"
         )
         console.print(
-            f"  Confidence: {confidence_color}{bar} {result.confidence}%[/]"
+            f"  Confidence: {confidence_color}{bar} {result.confidence}%[/]",
         )
         console.print()
 
@@ -162,6 +179,127 @@ def _display_diagnosis(result: Optional[InvestigationResult]) -> None:
 
         console.print("[dim]Tip: Copy-paste any command above to fix the issue.[/dim]")
         console.print()
+
+
+def _prompt_for_fix(suggested_commands: List[str]) -> Optional[int]:
+    """Prompt the user to select a fix option.
+
+    Args:
+        suggested_commands: List of suggested commands to choose from.
+
+    Returns:
+        The index of the selected command (0-based), or -1 for cancel, None for error.
+    """
+    console.print()
+    console.print("[bold]Choose a fix to apply:[/bold]")
+    console.print()
+
+    # Display options with numbering
+    for i, cmd in enumerate(suggested_commands, 1):
+        console.print(f"  {i}. [bold white]{cmd}[/bold white]")
+    console.print(f"  {len(suggested_commands) + 1}. [dim]Cancel[/dim]")
+    console.print()
+
+    try:
+        response = console.input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]Cancelled[/dim]")
+        return -1
+
+    # Parse the selection
+    try:
+        selection = int(response)
+    except ValueError:
+        console.print("[red]Invalid selection. Please enter a number.[/red]")
+        return None
+
+    if selection == len(suggested_commands) + 1:
+        console.print("[dim]Cancelled[/dim]")
+        return -1
+
+    if 1 <= selection <= len(suggested_commands):
+        return selection - 1  # Return 0-based index
+
+    console.print(f"[red]Invalid selection. Enter a number between 1 and {len(suggested_commands) + 1}.[/red]")
+    return None
+
+
+def _display_fix_result(result: CommandResult, plugin_name: str, context: Optional[Dict[str, Any]] = None) -> None:
+    """Display the result of executing a fix command."""
+    display_result(result, plugin_name, context)
+
+
+def _run_repair_loop(
+    original_command: str,
+    original_result: CommandResult,
+    plugin_name: str,
+    context: Optional[Dict[str, Any]],
+    diagnosis: InvestigationResult,
+) -> bool:
+    """Run the interactive repair loop.
+
+    Args:
+        original_command: The original command that failed.
+        original_result: The result of the original command.
+        plugin_name: The matching plugin name.
+        context: Structured context from the plugin.
+        diagnosis: The investigation diagnosis.
+
+    Returns:
+        True if a fix succeeded, False otherwise.
+    """
+    if not diagnosis.suggested_commands:
+        console.print("[dim]No suggested fixes available.[/dim]")
+        return False
+
+    while True:
+        # Prompt user to choose a fix
+        selection = _prompt_for_fix(diagnosis.suggested_commands)
+
+        if selection is None:
+            # Invalid input, retry
+            continue
+
+        if selection == -1:
+            # User cancelled
+            return False
+
+        # Execute the chosen fix
+        fix_command = diagnosis.suggested_commands[selection]
+        console.print()
+        console.print(f"[bold]Executing:[/bold] [cyan]{fix_command}[/cyan]")
+
+        fix_result = run_command(fix_command)
+        _display_fix_result(fix_result, find_matching_plugin(fix_command) or "unknown")
+
+        if fix_result.success:
+            console.print()
+            console.print("[bold green]✓ Fix succeeded![/bold green]")
+            return True
+
+        # Fix failed - re-investigate
+        console.print()
+        console.print("[yellow]Fix failed. Re-investigating...[/yellow]")
+        console.print()
+
+        # Build new investigation with the fix output
+        new_investigation = build_investigation(
+            command=original_command,
+            result=fix_result,
+            plugin=plugin_name,
+            context=context,
+        )
+
+        try:
+            diagnosis = run_investigation(new_investigation)
+            if diagnosis.root_cause:
+                _display_diagnosis(diagnosis)
+            else:
+                console.print("[dim]No diagnosis available for the fix attempt.[/dim]")
+                break
+        except ValueError as exc:
+            console.print(f"[red]Error during re-investigation: {exc}[/red]")
+            break
 
 
 def _display_agent_progress(command: str) -> "AgentState":
@@ -253,6 +391,94 @@ def _display_agent_progress(command: str) -> "AgentState":
     return final_state
 
 
+def _show_prediction_preview(command_str: str) -> bool:
+    """Show prediction preview before command execution.
+    
+    Returns True if user confirms (Y), False if user declines (n).
+    """
+    # Get project type and framework
+    project_type = detect_project_type()
+    project_root = _find_project_root()
+    framework = _detect_framework(project_root)
+    
+    console.print()
+    console.print("[bold blue]🔮 Command Prediction[/bold blue]")
+    console.print()
+    
+    # Build preview table
+    preview_table = Table.grid(padding=(0, 2))
+    preview_table.add_column(style="bold")
+    preview_table.add_column()
+    
+    # Show project type with framework if detected
+    if framework:
+        console.print(f"Detected project: [bold]{framework}[/bold]")
+    elif project_type != "Unknown":
+        console.print(f"Detected project: [bold]{project_type}[/bold]")
+    else:
+        console.print("Detected project: [dim]None[/dim]")
+    
+    console.print()
+    preview_table.add_row("[bold]Expected command:[/bold]", f"[cyan]{command_str}[/cyan]")
+    
+    console.print(Panel(preview_table, title="[bold]Command Prediction[/bold]", border_style="blue"))
+    console.print()
+    
+    # Show plugin preflight checks
+    plugin_name = find_matching_plugin(command_str)
+    plugin = get_plugin_by_name(plugin_name)
+    
+    if plugin:
+        checks = plugin.preflight_checks()
+        console.print(f"[bold blue]{plugin.name.title()} Plugin Checks:[/bold blue]")
+        console.print()
+        
+        # Build checks table in the format shown in task
+        checks_table = Table.grid(padding=(0, 2))
+        checks_table.add_column()
+        checks_table.add_column()
+        
+        for check in checks:
+            if check.passed:
+                checks_table.add_row(f"[green]✓[/green]", check.message)
+            else:
+                checks_table.add_row(f"[yellow]⚠[/yellow]", check.message)
+        
+        console.print(checks_table)
+        console.print()
+    
+    # Check for potential issues (plugin-specific predictions)
+    potential_issues = predict_potential_issues(command_str)
+    
+    # Check for intelligent warnings (proactive issue detection)
+    intelligent_warnings = run_intelligent_warnings(command_str)
+    
+    all_issues = potential_issues + intelligent_warnings
+    
+    if all_issues:
+        console.print("[bold yellow]Potential issues:[/bold yellow]")
+        console.print()
+        for issue in all_issues:
+            icon = "[yellow]⚠[/yellow]" if issue.level == "warning" else "[blue]ℹ[/blue]"
+            console.print(f"  {icon} {issue.message}")
+            if issue.suggestion:
+                console.print(f"    [dim]{issue.suggestion}[/dim]")
+        console.print()
+    
+    # Ask for confirmation
+    try:
+        response = console.input("Continue? [Y/n]: ")
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]Cancelled[/dim]")
+        return False
+    
+    if response.lower() in ("n", "no"):
+        console.print("[dim]Aborted by user[/dim]")
+        return False
+    
+    return True
+
+
 def _run_impl(command_str: str, config_path: Optional[Path] = None, skip_preflight: bool = False) -> None:
     """Shared implementation: execute a command and display the result."""
     _ = load_config(config_path)
@@ -288,6 +514,11 @@ def _run_impl(command_str: str, config_path: Optional[Path] = None, skip_preflig
                     if issue.suggestion:
                         console.print(f"  [dim]{issue.suggestion}[/dim]")
             console.print()
+    
+    # Show prediction preview (unless skipping preflight)
+    if not skip_preflight:
+        if not _show_prediction_preview(command_str):
+            raise typer.Exit(code=130)
 
     # Run the agent with live progress display
     state = _display_agent_progress(command_str)
@@ -318,6 +549,16 @@ def _run_impl(command_str: str, config_path: Optional[Path] = None, skip_preflig
     # Command failed — show AI diagnosis
     if state.diagnosis:
         _display_diagnosis(state.diagnosis)
+
+        # Run interactive repair loop
+        if state.diagnosis.suggested_commands:
+            _run_repair_loop(
+                original_command=state.command,
+                original_result=state.command_result,
+                plugin_name=state.matching_plugin or "unknown",
+                context=state.context,
+                diagnosis=state.diagnosis,
+            )
 
     raise typer.Exit(code=state.command_result.exit_code)
 
@@ -405,6 +646,23 @@ def explain(
     try:
         result = run_investigation(investigation_data)
         _display_diagnosis(result)
+
+        # Run interactive repair loop
+        if result.suggested_commands:
+            _run_repair_loop(
+                original_command=entry.command,
+                original_result=CommandResult(
+                    command=entry.command,
+                    stdout=entry.stdout,
+                    stderr=entry.stderr,
+                    exit_code=entry.exit_code,
+                    execution_time=0.0,
+                    success=False,
+                ),
+                plugin_name=entry.plugin,
+                context=entry.context,
+                diagnosis=result,
+            )
     except ValueError as exc:
         console.print(f"[red]✗ {exc}[/red]")
         console.print()
@@ -671,3 +929,153 @@ def entry() -> None:
 
 if __name__ == "__main__":
     entry()
+
+
+# ── Health Report ─────────────────────────────────────────────────────────────
+
+
+@app.command(name="health")
+def health(
+    path: Optional[Path] = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Path to check for health report (defaults to current directory)",
+        exists=False,
+    ),
+) -> None:
+    """Generate a health report for the current project.
+
+    Shows environment checks and project status:
+
+    - Node.js: Node and npm versions
+    - package.json: Project manifest
+    - .env.local: Environment file for Next.js projects
+    - Git: Working directory status
+    - Docker: Daemon running status
+
+    Example: terminal-copilot health
+    """
+    
+    cwd = path or Path.cwd()
+    project_root = _find_project_root(cwd)
+    framework = _detect_framework(project_root)
+    project_type = detect_project_type(cwd)
+    
+    console.print()
+    
+    # Show project name
+    if framework:
+        console.print(f"[bold blue]Project:[/bold blue] {framework}")
+    elif project_type != "Unknown":
+        console.print(f"[bold blue]Project:[/bold blue] {project_type}")
+    else:
+        console.print(f"[bold blue]Project:[/bold blue] [dim]Unknown[/dim]")
+    console.print()
+    
+    console.print("[bold blue]Environment[/bold blue]")
+    console.print()
+    
+    # Build checks table
+    checks_table = Table.grid(padding=(0, 2))
+    checks_table.add_column()
+    checks_table.add_column()
+    
+    score = 100
+    
+    # Check Node.js
+    node_version = _run_tool_check("node --version", extract_version=True)
+    if node_version:
+        checks_table.add_row("[green]✓[/green]", f"Node {node_version}")
+    else:
+        checks_table.add_row("[red]✗[/red]", "Node not installed")
+        score -= 20
+    
+    # Check npm
+    npm_version = _run_tool_check("npm --version")
+    if npm_version:
+        checks_table.add_row("[green]✓[/green]", f"npm {npm_version}")
+    else:
+        checks_table.add_row("[red]✗[/red]", "npm not installed")
+        score -= 20
+    
+    # Check package.json
+    package_json = project_root / "package.json"
+    if package_json.exists():
+        checks_table.add_row("[green]✓[/green]", "package.json")
+    else:
+        # Only penalize if it's a Node project
+        if project_type == "Node":
+            checks_table.add_row("[red]✗[/red]", "package.json missing")
+            score -= 15
+        else:
+            checks_table.add_row("[dim]○[/dim]", "[dim]package.json (not a Node project)[/dim]")
+    
+    # Check .env.local (Next.js convention)
+    env_file = project_root / ".env"
+    env_local_file = project_root / ".env.local"
+    if env_file.exists() and not env_local_file.exists():
+        checks_table.add_row("[yellow]⚠[/yellow]", ".env.local missing")
+        score -= 5
+    elif env_local_file.exists():
+        checks_table.add_row("[green]✓[/green]", ".env.local")
+    else:
+        checks_table.add_row("[dim]○[/dim]", "[dim].env.local (not needed)[/dim]")
+    
+    # Check Git - working directory clean
+    git_root = _run_tool_check("git rev-parse --show-toplevel")
+    if git_root:
+        # Check if working directory is clean
+        status = _run_tool_check("git status --porcelain")
+        if status:
+            checks_table.add_row("[yellow]⚠[/yellow]", "Git dirty")
+            score -= 8
+        else:
+            checks_table.add_row("[green]✓[/green]", "Git clean")
+    else:
+        checks_table.add_row("[dim]○[/dim]", "[dim]Git (not a repository)[/dim]")
+    
+    # Check Docker daemon
+    docker_version = _run_tool_check("docker --version")
+    if docker_version:
+        docker_ps = _run_tool_check("docker ps ", timeout=5)
+        if docker_ps and "Cannot connect to the Docker daemon" in docker_ps:
+            checks_table.add_row("[yellow]⚠[/yellow]", "Docker not running")
+            score -= 10
+        else:
+            checks_table.add_row("[green]✓[/green]", "Docker running")
+    else:
+        checks_table.add_row("[dim]○[/dim]", "[dim]Docker (not installed)[/dim]")
+    
+    console.print(checks_table)
+    console.print()
+    
+    # Show overall score
+    score_color = "[green]" if score >= 80 else "[yellow]" if score >= 60 else "[red]"
+    console.print(
+        f"[bold]Overall Score[/bold]\n\n  {score_color}{score}/100[/]"
+    )
+    console.print()
+
+
+def _run_tool_check(cmd: str, timeout: int = 5, extract_version: bool = False) -> Optional[str]:
+    """Run a quick shell command and return stripped stdout, or None on failure."""
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if extract_version and output:
+                # Extract version number (e.g., "v22.0.0" -> "22")
+                match = re.search(r"(\d+)", output)
+                if match:
+                    return match.group(1)
+            return output if output else None
+        return None
+    except Exception:
+        return None

@@ -45,6 +45,62 @@ PROJECT_MARKERS: Dict[str, List[str]] = {
     "Docker Compose": ["docker-compose.yml", "docker-compose.yaml"],
 }
 
+# Framework detection markers
+FRAMEWORK_MARKERS: Dict[str, str] = {
+    "next": "next.config.js",
+    "astro": "astro.config.mjs",
+    "nuxt": "nuxt.config.js",
+    "remix": "remix.config.js",
+    "sveltekit": "svelte.config.js",
+    "gatsby": "gatsby-config.js",
+    "vite": "vite.config.js",
+    "vue": "vue.config.js",
+}
+
+
+def _detect_framework(project_root: Path) -> Optional[str]:
+    """Detect framework from package.json dependencies or framework config files.
+    
+    Returns the framework name (e.g., "Next.js") if detected, None otherwise.
+    """
+    # First check for framework-specific config files
+    for framework, marker in FRAMEWORK_MARKERS.items():
+        if (project_root / marker).exists():
+            return framework.capitalize() + (".js" if framework == "next" or framework == "astro" or framework == "nuxt" else "")
+    
+    # Check package.json for framework dependencies
+    package_json = project_root / "package.json"
+    if package_json.exists():
+        try:
+            with open(package_json) as f:
+                pkg = json.load(f)
+            
+            deps = pkg.get("dependencies", {}) | pkg.get("devDependencies", {})
+            dep_names = {name.lower() for name in deps.keys()}
+            
+            # Check for Next.js
+            if "next" in dep_names:
+                return "Next.js"
+            # Check for Astro
+            if "astro" in dep_names:
+                return "Astro"
+            # Check for Nuxt
+            if "nuxt" in dep_names or "@nuxt/ui" in dep_names:
+                return "Nuxt"
+            # Check for Remix
+            if "@remix-run" in dep_names:
+                return "Remix"
+            # Check for SvelteKit
+            if "sveltekit" in dep_names or "@sveltejs/kit" in dep_names:
+                return "SvelteKit"
+            # Check for Gatsby
+            if "gatsby" in dep_names:
+                return "Gatsby"
+        except (json.JSONDecodeError, OSError):
+            pass
+    
+    return None
+
 
 def _parse_version(version_str: str) -> Optional[int]:
     """Parse a version string like 'v18.0.0' or '18.0.0' to major version int."""
@@ -283,11 +339,30 @@ def _find_project_root(cwd: Optional[Path] = None) -> Path:
     return current
 
 
+class PreflightCheck:
+    """A single preflight check result."""
+    
+    def __init__(self, passed: bool, message: str, suggestion: Optional[str] = None):
+        self.passed = passed
+        self.message = message
+        self.suggestion = suggestion
+    
+    @property
+    def status(self) -> str:
+        """Return the status icon for display."""
+        return "✓" if self.passed else "⚠"
+    
+    @property
+    def level(self) -> str:
+        """Return the level for compatibility with PreflightIssue."""
+        return "info" if self.passed else "warning"
+
+
 class BasePlugin(ABC):
     """Base class for all plugins.
 
     Each plugin can determine whether it supports a given command,
-    and collect structured context from the environment.
+    collect structured context from the environment, and run preflight checks.
     """
 
     name: str = ""
@@ -316,6 +391,17 @@ class BasePlugin(ABC):
         """
         return {}
 
+    def preflight_checks(self, cwd: Optional[Path] = None) -> List[PreflightCheck]:
+        """Run preflight checks for this plugin's domain.
+
+        Args:
+            cwd: The working directory to check. Defaults to current directory.
+
+        Returns:
+            A list of PreflightCheck results for each check performed.
+        """
+        return []
+
     def available_tools(self) -> List[Dict[str, Any]]:
         """Return the subset of global tools relevant to this plugin.
 
@@ -327,7 +413,7 @@ class BasePlugin(ABC):
 
 
 class NpmPlugin(BasePlugin):
-    """Plugin for npm/pnpm commands."""
+    """Plugin for npm/pnpm/yarn commands."""
 
     name = "npm"
 
@@ -339,6 +425,58 @@ class NpmPlugin(BasePlugin):
             or stripped.startswith("yarn ")
             or stripped.startswith("npx ")
         )
+
+    def preflight_checks(self, cwd: Optional[Path] = None) -> List[PreflightCheck]:
+        """Run preflight checks for Node.js/npm projects."""
+        checks: List[PreflightCheck] = []
+        cwd_path = cwd or Path.cwd()
+        project_root = _find_project_root(cwd_path)
+
+        # Check package.json
+        package_json = project_root / "package.json"
+        checks.append(PreflightCheck(
+            passed=package_json.exists(),
+            message="package.json",
+            suggestion=None if package_json.exists() else "Run 'npm init' to create a package.json",
+        ))
+
+        # Check Node version
+        node_version = _run_quick_command("node --version 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=node_version is not None,
+            message=f"node {node_version or 'not installed'}",
+            suggestion="Install Node.js from https://nodejs.org" if not node_version else None,
+        ))
+
+        # Check npm version
+        npm_version = _run_quick_command("npm --version 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=npm_version is not None,
+            message=f"npm {npm_version or 'not installed'}",
+            suggestion="Install Node.js from https://nodejs.org" if not npm_version else None,
+        ))
+
+        # Check lockfile
+        has_lockfile = (
+            (project_root / "package-lock.json").exists()
+            or (project_root / "pnpm-lock.yaml").exists()
+            or (project_root / "yarn.lock").exists()
+        )
+        checks.append(PreflightCheck(
+            passed=has_lockfile,
+            message="lockfile",
+            suggestion="Run 'npm install' or your package manager's install command to create a lockfile",
+        ))
+
+        # Check node_modules
+        has_node_modules = (project_root / "node_modules").is_dir()
+        checks.append(PreflightCheck(
+            passed=has_node_modules,
+            message="node_modules",
+            suggestion="Run 'npm install' to install dependencies",
+        ))
+
+        return checks
 
     def collect_context(
         self, command: str, cwd: Optional[Path] = None
@@ -393,6 +531,53 @@ class DockerPlugin(BasePlugin):
     def supports(self, command: str) -> bool:
         return command.strip().startswith("docker ")
 
+    def preflight_checks(self, cwd: Optional[Path] = None) -> List[PreflightCheck]:
+        """Run preflight checks for Docker projects."""
+        checks: List[PreflightCheck] = []
+
+        # Check Docker installed
+        docker_version = _run_quick_command("docker --version 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=docker_version is not None,
+            message=f"Docker installed {docker_version or ''}",
+            suggestion="Install Docker from https://docker.com" if not docker_version else None,
+        ))
+
+        # Check Docker daemon running (only if Docker is installed)
+        if docker_version:
+            docker_ps = _run_quick_command("docker ps 2>&1", timeout=5)
+            daemon_running = docker_ps is None or "Cannot connect to the Docker daemon" not in (docker_ps or "")
+            checks.append(PreflightCheck(
+                passed=daemon_running,
+                message="daemon running",
+                suggestion="Start Docker: 'systemctl start docker' or launch Docker Desktop",
+            ))
+
+        # Check Dockerfile
+        cwd_path = cwd or Path.cwd()
+        project_root = _find_project_root(cwd_path)
+        dockerfile_exists = _file_exists(project_root / "Dockerfile")
+        checks.append(PreflightCheck(
+            passed=dockerfile_exists,
+            message="Dockerfile",
+            suggestion=None if dockerfile_exists else "Create a Dockerfile for containerized builds",
+        ))
+
+        # Check compose plugin (for docker-compose.yml/docker-compose.yaml)
+        compose_exists = (
+            _file_exists(project_root / "docker-compose.yml")
+            or _file_exists(project_root / "docker-compose.yaml")
+        )
+        checks.append(PreflightCheck(
+            passed=compose_exists,
+            message="compose plugin",
+            suggestion="Install docker-compose: 'pip install docker-compose' or use 'docker compose'" 
+                if not compose_exists
+                else None,
+        ))
+
+        return checks
+
     def collect_context(
         self, command: str, cwd: Optional[Path] = None
     ) -> Dict[str, Any]:
@@ -438,6 +623,28 @@ class GitPlugin(BasePlugin):
     def supports(self, command: str) -> bool:
         return command.strip().startswith("git ")
 
+    def preflight_checks(self, cwd: Optional[Path] = None) -> List[PreflightCheck]:
+        """Run preflight checks for git commands."""
+        checks: List[PreflightCheck] = []
+
+        # Check Git installed
+        git_version = _run_quick_command("git --version 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=git_version is not None,
+            message=f"Git installed {git_version or ''}",
+            suggestion="Install Git from https://git-scm.com" if not git_version else None,
+        ))
+
+        # Check we're in a git repo
+        git_root = _run_quick_command("git rev-parse --show-toplevel 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=git_root is not None,
+            message="in git repository",
+            suggestion="Run 'git init' to initialize a repository or check your directory",
+        ))
+
+        return checks
+
     def collect_context(
         self, command: str, cwd: Optional[Path] = None
     ) -> Dict[str, Any]:
@@ -447,7 +654,7 @@ class GitPlugin(BasePlugin):
         context["git_version"] = _run_quick_command("git --version")
 
         # Check if we're in a git repo
-        git_root = _run_quick_command("git rev-parse --show-toplevel")
+        git_root = _run_quick_command("git rev-parse --show-toplevel 2>/dev/null")
         if git_root:
             context["in_git_repo"] = True
             context["git_root"] = git_root
@@ -481,7 +688,7 @@ class GitPlugin(BasePlugin):
         return context
 
 
-# ── Compilation / Build Plugins ─────────────────────────────────────────────
+# ── Compilation / Build Plugins ───────────────────────────────────────────────
 
 
 class CCompilePlugin(BasePlugin):
@@ -501,6 +708,36 @@ class CCompilePlugin(BasePlugin):
             or stripped.startswith("cc ")
             or stripped.startswith("c++ ")
         )
+
+    def preflight_checks(self, cwd: Optional[Path] = None) -> List[PreflightCheck]:
+        """Run preflight checks for C/C++ projects."""
+        checks: List[PreflightCheck] = []
+
+        # Check gcc
+        gcc_version = _run_quick_command("gcc --version 2>/dev/null | head -1")
+        checks.append(PreflightCheck(
+            passed=gcc_version is not None,
+            message="gcc installed",
+            suggestion="Install gcc for C compilation" if not gcc_version else None,
+        ))
+
+        # Check g++
+        gpp_version = _run_quick_command("g++ --version 2>/dev/null | head -1")
+        checks.append(PreflightCheck(
+            passed=gpp_version is not None,
+            message="g++ installed",
+            suggestion="Install g++ for C++ compilation" if not gpp_version else None,
+        ))
+
+        # Check make
+        make_version = _run_quick_command("make --version 2>/dev/null | head -1")
+        checks.append(PreflightCheck(
+            passed=make_version is not None,
+            message="make installed",
+            suggestion="Install make for build automation" if not make_version else None,
+        ))
+
+        return checks
 
     def collect_context(
         self, command: str, cwd: Optional[Path] = None
@@ -540,6 +777,38 @@ class RustPlugin(BasePlugin):
             stripped.startswith("rustc ")
             or stripped.startswith("cargo ")
         )
+
+    def preflight_checks(self, cwd: Optional[Path] = None) -> List[PreflightCheck]:
+        """Run preflight checks for Rust projects."""
+        checks: List[PreflightCheck] = []
+
+        # Check rustc
+        rustc_version = _run_quick_command("rustc --version 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=rustc_version is not None,
+            message=f"rustc {rustc_version or 'not installed'}",
+            suggestion="Install Rust from https://rustup.rs" if not rustc_version else None,
+        ))
+
+        # Check cargo
+        cargo_version = _run_quick_command("cargo --version 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=cargo_version is not None,
+            message=f"cargo {cargo_version or 'not installed'}",
+            suggestion="Install Rust from https://rustup.rs" if not cargo_version else None,
+        ))
+
+        # Check Cargo.toml exists
+        cwd_path = cwd or Path.cwd()
+        project_root = _find_project_root(cwd_path)
+        cargo_toml_exists = _file_exists(project_root / "Cargo.toml")
+        checks.append(PreflightCheck(
+            passed=cargo_toml_exists,
+            message="Cargo.toml",
+            suggestion="Ensure you're in a Rust project directory or run 'cargo init'",
+        ))
+
+        return checks
 
     def collect_context(
         self, command: str, cwd: Optional[Path] = None
@@ -584,6 +853,30 @@ class GoPlugin(BasePlugin):
         stripped = command.strip()
         return stripped.startswith("go ")
 
+    def preflight_checks(self, cwd: Optional[Path] = None) -> List[PreflightCheck]:
+        """Run preflight checks for Go projects."""
+        checks: List[PreflightCheck] = []
+
+        # Check Go installed
+        go_version = _run_quick_command("go version 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=go_version is not None,
+            message=f"Go installed {go_version or ''}",
+            suggestion="Install Go from https://go.dev" if not go_version else None,
+        ))
+
+        # Check go.mod exists
+        cwd_path = cwd or Path.cwd()
+        project_root = _find_project_root(cwd_path)
+        go_mod_exists = _file_exists(project_root / "go.mod")
+        checks.append(PreflightCheck(
+            passed=go_mod_exists,
+            message="go.mod",
+            suggestion="Run 'go mod init' to initialize a Go module" if not go_mod_exists else None,
+        ))
+
+        return checks
+
     def collect_context(
         self, command: str, cwd: Optional[Path] = None
     ) -> Dict[str, Any]:
@@ -624,6 +917,28 @@ class PythonPlugin(BasePlugin):
             or stripped.startswith("python3 ")
             or stripped.startswith("python3.")
         )
+
+    def preflight_checks(self, cwd: Optional[Path] = None) -> List[PreflightCheck]:
+        """Run preflight checks for Python projects."""
+        checks: List[PreflightCheck] = []
+
+        # Check Python installed
+        python_version = _run_quick_command("python3 --version 2>/dev/null")
+        checks.append(PreflightCheck(
+            passed=python_version is not None,
+            message=f"Python {python_version or 'not installed'}",
+            suggestion="Install Python from https://python.org" if not python_version else None,
+        ))
+
+        # Check virtual environment
+        in_venv = os.environ.get("VIRTUAL_ENV") or os.environ.get("PIP_REQUIRE_VIRTUALENV")
+        checks.append(PreflightCheck(
+            passed=bool(in_venv),
+            message="virtual environment",
+            suggestion="Consider using a virtual environment: 'python -m venv venv && source venv/bin/activate'",
+        ))
+
+        return checks
 
     def collect_context(
         self, command: str, cwd: Optional[Path] = None

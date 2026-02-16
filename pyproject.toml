@@ -3,7 +3,22 @@ name = "terminal-copilot"
 version = "0.1.0"
 description = "A CLI tool that wraps shell commands with diagnostics and AI-ready workflows."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
+authors = [
+    { name = "Smit Bafna", email = "bafnasmit@gmail.com" }
+]
+keywords = ["cli", "ai", "diagnostics", "terminal", "gemini"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Terminals",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "typer>=0.12.0",
     "rich>=13.7.0",
@@ -13,6 +28,12 @@ dependencies = [
     "google-genai>=1.0.0",
     "python-dotenv>=1.2.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Smitbafna/terminal-copilot"
+Repository = "https://github.com/Smitbafna/terminal-copilot"
+Documentation = "https://github.com/Smitbafna/terminal-copilot#readme"
+Issues = "https://github.com/Smitbafna/terminal-copilot/issues"
 
 [project.scripts]
 terminal-copilot = "terminal_copilot.cli:entry"
