@@ -229,6 +229,24 @@ def _display_fix_result(result: CommandResult, plugin_name: str, context: Option
     display_result(result, plugin_name, context)
 
 
+def _extract_command(cmd: str) -> str:
+    """Extract only the shell command, stripping parenthetical explanations.
+    
+    The LLM may return commands with explanations like:
+    'docker build -t image . (if you intended to build a local image)'
+    
+    This function extracts just 'docker build -t image .'
+    """
+    # If there's a parenthetical at the end, strip it
+    if "(" in cmd and ")" in cmd:
+        # Find the last complete parenthetical
+        last_open = cmd.rfind("(")
+        last_close = cmd.rfind(")")
+        if last_close > last_open:
+            cmd = cmd[:last_open].strip()
+    return cmd
+
+
 def _run_repair_loop(
     original_command: str,
     original_result: CommandResult,
@@ -265,7 +283,8 @@ def _run_repair_loop(
             return False
 
         # Execute the chosen fix
-        fix_command = diagnosis.suggested_commands[selection]
+        raw_command = diagnosis.suggested_commands[selection]
+        fix_command = _extract_command(raw_command)
         console.print()
         console.print(f"[bold]Executing:[/bold] [cyan]{fix_command}[/cyan]")
 

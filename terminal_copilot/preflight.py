@@ -154,15 +154,15 @@ def _npm_preflight(command: str) -> List[PreflightIssue]:
             suggestion="Install Node.js from https://nodejs.org",
         ))
     
-    # Check for common typos
-    if "npm instal" in command:  # Typo: missing 'l'
+    # Check for common typos (use regex to match exact typo without triggering on correct command)
+    if re.search(r"npm\s+instal(?!l)", command):  # Typo: missing 'l'
         issues.append(PreflightIssue(
             level="error",
             message="Possible typo: 'npm instal' should be 'npm install'",
             suggestion="Correct the command to: npm install",
         ))
     
-    if "npm uninstal" in command:  # Typo
+    if re.search(r"npm\s+uninstal(?!l)", command):  # Typo
         issues.append(PreflightIssue(
             level="error",
             message="Possible typo: 'npm uninstal' should be 'npm uninstall'",

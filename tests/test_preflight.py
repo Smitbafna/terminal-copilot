@@ -136,11 +136,25 @@ class TestNpmPreflight:
         error_issues = [i for i in issues if i.level == "error"]
         assert any("npm instal" in i.message for i in error_issues)
 
+    def test_npm_install_not_flagged_as_typo(self):
+        """Test that correct 'npm install' command is NOT flagged as typo."""
+        issues = _npm_preflight("npm install")
+        error_issues = [i for i in issues if i.level == "error"]
+        typo_issues = [i for i in error_issues if "npm instal" in i.message]
+        assert len(typo_issues) == 0
+
     def test_npm_typo_uninstall(self):
         """Test detection of npm uninstall typo."""
         issues = _npm_preflight("npm uninstal")
         error_issues = [i for i in issues if i.level == "error"]
         assert any("npm uninstal" in i.message for i in error_issues)
+
+    def test_npm_uninstall_not_flagged_as_typo(self):
+        """Test that correct 'npm uninstall' command is NOT flagged as typo."""
+        issues = _npm_preflight("npm uninstall")
+        error_issues = [i for i in issues if i.level == "error"]
+        typo_issues = [i for i in error_issues if "npm uninstal" in i.message]
+        assert len(typo_issues) == 0
 
 
 class TestDockerPreflight:
