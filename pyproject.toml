@@ -1,5 +1,5 @@
 [project]
-name = "terminal-copilot"
+name = "terminal-copilot-cli"
 version = "0.1.0"
 description = "A CLI tool that wraps shell commands with diagnostics and AI-ready workflows."
 readme = "README.md"
