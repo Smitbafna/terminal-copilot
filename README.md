@@ -1,6 +1,6 @@
 # Terminal Copilot
 
-A CLI tool that wraps shell commands with diagnostics and an AI-ready workflow foundation.
+Terminal Copilot is a CLI tool that wraps shell commands with intelligent diagnostics and an AI-powered workflow foundation. It helps developers catch issues before they become failures through proactive preflight checks and environment validation. When commands do fail, it uses AI to diagnose the root cause and guide you through an interactive repair loop with suggested fixes.
 
 ## Installation
 
@@ -102,14 +102,19 @@ README.md
 - [PyYAML](https://pyyaml.org/) – Config parsing
 - [LangGraph](https://langchain-ai.github.io/langgraph/) – Workflow graph
 
-## Milestone 5: Interactive Repair Loop
+## Features
 
-- [x] Failure diagnosis with suggested commands
-- [x] Interactive fix selection prompt
-- [x] Execute chosen fix command
-- [x] Re-investigation on fix failure
-- [x] Loop until fix succeeds or user cancels
-- [x] Available in both `run` and `explain` commands
+- **AI-Powered Diagnostics**: Automatically analyzes command failures and identifies root causes using AI
+- **Interactive Repair Loop**: Guides you through suggested fixes with an interactive selection prompt, retrying until success
+- **Proactive Preflight Checks**: Validates project environment before execution to catch issues early
+- **Multi-Plugin Support**: Built-in plugins for npm, Docker, Git, Rust, Go, and Python ecosystems
+- **Project Type Detection**: Automatically detects project types from marker files (package.json, Cargo.toml, etc.)
+- **Environment Validation**: Compares installed tool versions against project requirements (Node.js, Python, Docker)
+- **Intelligent Warnings**: Proactively warns about merge conflicts, missing dependencies, port conflicts, and more
+- **Rich Terminal Output**: Beautiful formatted output with exit codes, timing, and separated stdout/stderr panels
+- **Configurable**: YAML-based configuration for customizing providers, plugins, and auto-execution behavior
+- **Explain Mode**: Analyze previously failed commands to understand what went wrong
+
 
 ### Interactive Repair Flow
 
@@ -161,17 +166,7 @@ terminal-copilot explain
 # You can select and execute a fix directly
 ```
 
-## Milestone 4: Project Health & Preflight Checks
 
-- [x] Preflight checks before command execution
-- [x] Plugin-specific health checks (npm, docker, git, python, rust, go)
-- [x] Warning system for potential issues
-- [x] Error blocking for preventing dangerous commands
-- [x] `--skip-preflight` flag to bypass checks
-- [x] Project type detection from marker files
-- [x] Environment validation against project requirements
-- [x] Missing dependency detection (node_modules, Cargo.lock)
-- [x] Intelligent warnings for proactive issue detection
 
 ### Project Detection
 
@@ -260,9 +255,3 @@ Example warnings displayed before execution:
   Another process is using port 3000. Check with 'lsof -i :3000' or kill the process.
 ```
 
-## Future Milestones
-
-- Auto-fixing failed commands
-- File scanning and project analysis
-- Streaming output improvements
-- Watchdog mode
