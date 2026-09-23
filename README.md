@@ -5,7 +5,9 @@ Terminal Copilot is a CLI tool that wraps shell commands with intelligent diagno
 ## Installation
 
 ```bash
-uv sync
+python3 -m venv venv
+source venv/bin/activate
+pip install terminal-copilot-cli
 ```
 
 ## Setup
