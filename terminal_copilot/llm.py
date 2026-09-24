@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
@@ -22,6 +23,14 @@ load_dotenv()  # also check cwd and parent dirs as fallback
 
 
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
+
+
+@dataclass(frozen=True)
+class CommandCorrectionSuggestion:
+    """A validated command-name correction proposed by the LLM."""
+
+    command: str
+    reason: str
 
 
 def _get_api_key() -> str:
@@ -198,6 +207,99 @@ def call_llm_for_tool_request(
         raise ValueError(
             f"Failed to parse LLM response as JSON. Response was:\n{raw}\n\nError: {exc}"
         )
+
+
+def suggest_command_correction(
+    command: str,
+    candidates: List[str],
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = 128,
+) -> Optional[CommandCorrectionSuggestion]:
+    """Ask Gemini to identify a likely executable-name correction.
+
+    The model is asked for JSON containing one candidate from ``candidates``
+    and a short explanation. Invalid or out-of-vocabulary responses are
+    rejected rather than returned to the caller.
+
+    Args:
+        command: The unrecognized command supplied by the user.
+        candidates: Allowed executable names.
+        model: Gemini model identifier.
+        temperature: Sampling temperature.
+        max_tokens: Maximum response size.
+
+    Returns:
+        A validated suggestion, or ``None`` when no usable suggestion exists.
+    """
+    if not candidates:
+        return None
+
+    candidate_list = sorted(set(candidates))
+    candidate_json = json.dumps(candidate_list)
+    system_content = (
+        "You correct misspellings of terminal command executable names. "
+        "The user supplied an unknown first command token. Choose the most "
+        "likely intended executable from the allowed candidate list.\n\n"
+        "Rules:\n"
+        "1. Return a candidate exactly as written in the allowed list.\n"
+        "2. Do not change arguments, flags, paths, or shell syntax.\n"
+        "3. If no candidate is plausible, return null.\n"
+        "4. Return JSON only, with this exact shape:\n"
+        '{"corrected_command": "candidate", "reason": "short explanation"}\n'
+        "For no match, return:\n"
+        '{"corrected_command": null, "reason": "no confident match"}\n\n'
+        f"Allowed candidates: {candidate_json}"
+    )
+    prompt = (
+        f"{system_content}\n\n"
+        f"Unknown command token: {json.dumps(command)}\n"
+        "Respond with JSON only."
+    )
+
+    api_key = _get_api_key()
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        ),
+    )
+
+    raw = (response.text or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+    if raw.startswith("```json"):
+        raw = raw[7:].strip()
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    corrected = data.get("corrected_command")
+    if not isinstance(corrected, str) or corrected not in candidate_list:
+        return None
+
+    reason = data.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = f"LLM matched {command} to {corrected}"
+
+    return CommandCorrectionSuggestion(
+        command=corrected,
+        reason=reason.strip(),
+    )
 
 
 # ── Legacy functions (backwards compat for `explain` command) ──

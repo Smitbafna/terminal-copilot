@@ -31,6 +31,8 @@ from terminal_copilot.plugins import (
 )
 from terminal_copilot.history import record_failed_command, load_last_failed
 from terminal_copilot.investigation import run_investigation, build_investigation
+from terminal_copilot.command_correction import candidate_commands, correct_command
+from terminal_copilot.llm import suggest_command_correction
 from terminal_copilot.preflight import (
     run_preflight,
     format_preflight_result,
@@ -501,6 +503,40 @@ def _show_prediction_preview(command_str: str) -> bool:
 def _run_impl(command_str: str, config_path: Optional[Path] = None, skip_preflight: bool = False) -> None:
     """Shared implementation: execute a command and display the result."""
     _ = load_config(config_path)
+
+    original_command = command_str
+
+    def suggest_with_llm(
+        token: str,
+        candidates: tuple[str, ...],
+    ) -> Optional[tuple[str, str]]:
+        console.print(f"[dim]Asking Gemini to match unknown command: {token}[/dim]")
+        try:
+            suggestion = suggest_command_correction(token, list(candidates))
+        except ValueError as exc:
+            # A missing API key should not prevent the user from running the
+            # command they explicitly supplied.
+            console.print(f"[yellow]LLM command matching unavailable: {exc}[/yellow]")
+            return None
+        except Exception as exc:
+            console.print(f"[yellow]LLM command matching failed: {exc}[/yellow]")
+            return None
+
+        if suggestion is None:
+            return None
+        return suggestion.command, suggestion.reason
+
+    command_str, correction = correct_command(command_str, suggest_with_llm)
+    if correction:
+        console.print()
+        console.print(Panel(
+            f"[bold]Original:[/bold] {original_command}\n"
+            f"[bold]Corrected:[/bold] [green]{command_str}[/green]\n\n"
+            f"[dim]{correction}[/dim]",
+            title="[bold yellow]Command Corrected[/bold yellow]",
+            border_style="yellow",
+        ))
+        console.print()
 
     # Run preflight checks before executing
     if not skip_preflight:

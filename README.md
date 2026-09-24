@@ -109,6 +109,7 @@ README.md
 - **AI-Powered Diagnostics**: Automatically analyzes command failures and identifies root causes using AI
 - **Interactive Repair Loop**: Guides you through suggested fixes with an interactive selection prompt, retrying until success
 - **Proactive Preflight Checks**: Validates project environment before execution to catch issues early
+- **Command Correction**: Uses local fuzzy matching first, then Gemini to resolve unknown executable-name typos
 - **Multi-Plugin Support**: Built-in plugins for npm, Docker, Git, Rust, Go, and Python ecosystems
 - **Project Type Detection**: Automatically detects project types from marker files (package.json, Cargo.toml, etc.)
 - **Environment Validation**: Compares installed tool versions against project requirements (Node.js, Python, Docker)
